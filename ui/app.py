@@ -1,9 +1,5 @@
 # ui/app.py
 
-# FIX 6 — Move uuid import to module top level.
-# The original imported uuid inside the button callback block. While Python
-# allows this, importing inside a hot path (re-evaluated on every Streamlit
-# rerun) is wasteful. Module-level imports are cached after the first load.
 import uuid
 import json
 import requests
@@ -20,15 +16,42 @@ col1, col2 = st.columns([1, 2])
 
 with col1:
     st.subheader("Upload a Policy Document")
+
+    # ── Document selector ────────────────────────────────────────────────────
+    # Load all previously ingested documents from the registry on the API.
+    # This means returning users can select a document and investigate without
+    # re-uploading — the version is fetched from the persistent registry and
+    # stored in session_state, exactly as if they had just ingested it.
+
+    try: 
+        docs_res = requests.get(f"{API_URL}/documents", timeout=3)
+        known_docs = docs_res.json().get("documents", {}) if docs_res.status_code == 200 else {}
+    except requests.exceptions.ConnectionError:
+        known_docs = {}
+
+    if known_docs:
+        st.markdown("**Previously Ingested Document**")
+        selected = st.selectbox(
+            "Select a document to investigate",
+            options=list(known_docs.keys()),
+            index=0,
+        )
+        if st.button("Load document", key="load_existing"):
+            st.session_state["current_version"] = known_docs[selected]
+            st.session_state["current_filename"] = selected
+
+            # Clear state report when switching reports
+            st.session_state.pop("last_report", None)
+            st.session_state.pop("last_query", None)
+            st.session_state.pop("last_version", None)
+            st.success(f"Loaded: {selected}")
+        
+    st.markdown("**Or Upload a New Document**")
     uploaded = st.file_uploader("Choose a PDF", type=["pdf"])
 
     if uploaded and st.button("Ingest PDF", type="primary"):
         session_id = f"v_{uuid.uuid4().hex[:6]}"
 
-        # FIX 7 — Remove erroneous extra indent inside with-block.
-        # The original had an extra level of indentation on the requests.post
-        # call that didn't match the with: block — cosmetic but signals
-        # copy-paste drift and makes the scope misleading.
         with st.spinner("Ingesting document..."):
             res = requests.post(
                 f"{API_URL}/ingest",
@@ -37,12 +60,38 @@ with col1:
             )
 
         if res.status_code == 200:
-            st.success(f"Ingested: {res.json()['filename']}, version: {session_id}")
-            # Store both version AND filename so the investigation panel can
-            # reference them without re-deriving from the response.
-            st.session_state["current_version"] = session_id
+            data = res.json()
+
+            returned_version = data["version"]
+
+            if data.get("status") == "already_ingested":
+                st.info(
+                    f"'{uploaded.name}' was already ingested. "
+                    f"Using existing version. "
+                    f"Check 'Force re-ingest' to update it."
+                )
+
+            else:
+                st.success(f"Ingested: {data['filename']}")
+ 
+            st.session_state["current_version"] = returned_version
+            st.session_state["current_filename"] = data["filename"]
+
+            # Clear any stale report from a previous session so the UI
+            # doesn't show old results for the newly ingested document.
+            st.session_state.pop("last_report", None)
+            st.session_state.pop("last_query", None)
+            st.session_state.pop("last_version", None)
+ 
+            # Force a rerun so the "Active document" indicator and document
+            # selector both refresh immediately with the new document.
+            st.rerun()
         else:
             st.error(f"Ingestion failed ({res.status_code}): {res.text}")
+
+    # Show which document is currently active
+    if "current_filename" in st.session_state:
+        st.info(f"Active document: **{st.session_state['current_filename']}**")
 
 with col2:
     st.subheader("Run an Investigation")
@@ -50,45 +99,38 @@ with col2:
         "", placeholder="e.g. 'Show evidence that MFA is required for privileged accounts'"
     )
 
-    # FIX 8 + FIX 9 — Decouple PDF export from the Investigate button click.
-    #
-    # Original problem:
-    #   The "Generate PDF Report" button was nested inside
-    #   `if st.button("Investigate")`. In Streamlit, every interaction
-    #   triggers a full script rerun. When the user clicks "Generate PDF",
-    #   the "Investigate" button is no longer active — its `if` block
-    #   evaluates to False — so the inner button and the `report`/`version`
-    #   variables it depends on are never reached. The PDF button appeared
-    #   to click but nothing happened.
-    #
-    # Fix: store the report and version in st.session_state after a
-    # successful investigation. The PDF export button lives outside the
-    # Investigate block and reads from session_state, so it works correctly
-    # on its own rerun cycle.
-
     if st.button("Investigate", type="primary", disabled=not query):
-        # FIX 9 — Read version from session_state here (inside the click
-        # handler) so it's available at the moment of the API call.
-        version = st.session_state.get("current_version", "1.0")
+        # Read version from session_state here (inside the click handler) so it's available at the moment of the API call.
+        version = st.session_state.get("current_version")
 
-        with st.spinner("Running investigation..."):
-            # FIX 2 (frontend side) — Changed from GET to POST to match the
-            # updated API. Query and version are sent as JSON body, not URL
-            # params, eliminating the query-string length limit.
-            res = requests.post(
-                f"{API_URL}/investigate",
-                json={"query": query, "ingestion_version": version},
+        if not version:
+            st.warning(
+                "No document selected. Please upload a new document or "
+                "select a previously ingested one from the left panel."
             )
-
-        if res.status_code == 200:
-            report = res.json()
-            # Persist report and query so the PDF button can use them on its
-            # own rerun without re-running the investigation.
-            st.session_state["last_report"] = report
-            st.session_state["last_query"] = query
-            st.session_state["last_version"] = version
         else:
-            st.error(f"Investigation failed ({res.status_code}): {res.text}")
+            with st.spinner("Running investigation..."):
+                res = requests.post(
+                    f"{API_URL}/investigate",
+                    json={"query": query, "ingestion_version": version},
+                    timeout=120,
+                )
+
+            if res.status_code == 200:
+                report = res.json()
+                # Persist report and query so the PDF button can use them on its
+                # own rerun without re-running the investigation.
+                st.session_state["last_report"] = report
+                st.session_state["last_query"] = query
+                st.session_state["last_version"] = version
+            elif res.status_code == 503:
+                try:
+                    detail = res.json().get("detail", res.text)
+                except Exception:
+                    detail = res.text
+                st.error(f"Investigation failed: {detail}")
+            else:
+                st.error(f"Investigation failed ({res.status_code}): {res.text}")
 
     # Render results if a report exists in session (persists across reruns)
     report = st.session_state.get("last_report")
@@ -120,19 +162,11 @@ with col2:
             mime="application/json",
         )
 
-        # FIX 8 — PDF button is now a standalone widget outside the
-        # Investigate block. It reads query/version/report from session_state
-        # and sends the already-generated report to the export endpoint,
-        # which only renders PDF — no second LLM call (aligns with FIX 4
-        # in main.py).
         if st.button("Generate PDF Report"):
             saved_query = st.session_state.get("last_query", "")
             saved_version = st.session_state.get("last_version", "1.0")
 
             with st.spinner("Building PDF..."):
-                # FIX 2 (frontend side) — POST with JSON body.
-                # FIX 4 (frontend side) — Send the cached report so the
-                # server doesn't re-run the LLM.
                 pdf_res = requests.post(
                     f"{API_URL}/investigate/export",
                     json={
@@ -142,7 +176,7 @@ with col2:
                     },
                 )
 
-            # FIX 10 — Check PDF response status before offering download.
+            # Check PDF response status before offering download.
             # The original passed pdf_res.content to st.download_button
             # unconditionally. If the export endpoint returned an error,
             # the user would download a corrupt file with no indication of
