@@ -1,0 +1,52 @@
+# ── Environment ──────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+.env/
+
+# ── Data / Documents (user uploads — never commit real policy docs) ───────────
+data/documents/
+data/ingestion_registry.json
+
+# ── Qdrant local persistence (if running embedded or with a volume mount) ─────
+qdrant_storage/
+
+# ── Ollama model blobs ────────────────────────────────────────────────────────
+# These are multi-GB files that live in ~/.ollama; never in the repo.
+*.gguf
+*.bin
+models/
+
+# ── OS / Editor ───────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Test artifacts ────────────────────────────────────────────────────────────
+.pytest_cache/
+htmlcov/
+.coverage
